@@ -3,10 +3,9 @@ import streamlit.components.v1 as components
 
 st.set_page_config(page_title="Rail Runner 3D", page_icon="🏃", layout="centered")
 
-st.title("🏃 Rail Runner 3D")
-st.caption("Game vượt chướng ngại vật phong cách Endless Runner chạy trực tiếp trên Streamlit.")
+st.title("🏃 Rail Runner 3D (Có Âm Thanh)")
+st.caption("Game Endless Runner 3D có tích hợp nhạc nền và hiệu ứng âm thanh.")
 
-# Khối Canvas game viết bằng HTML, CSS và JavaScript
 game_html = """
 <!DOCTYPE html>
 <html>
@@ -40,19 +39,121 @@ game_html = """
 <body>
   <canvas id="gameCanvas" width="400" height="580"></canvas>
   <div class="guide">
-    <b>Điều khiển:</b> ⬅️ / ➡️ (hoặc A / D) để chuyển làn | ⬆️ / Space để nhảy
+    <b>Điều khiển:</b> ⬅️ / ➡️ để chuyển làn | ⬆️ / Space để nhảy (Nhấn phím bất kỳ để bật tiếng)
   </div>
 
   <script>
     const canvas = document.getElementById("gameCanvas");
     const ctx = canvas.getContext("2d");
 
-    // Điểm tụ phối cảnh (Vanishing Point)
+    // ==========================================
+    // HỆ THỐNG ÂM THANH (WEB AUDIO API)
+    // ==========================================
+    let audioCtx = null;
+    let bgmInterval = null;
+    let bgmStep = 0;
+
+    // Chuỗi nốt nhạc nền 8-bit sôi động
+    const bgmNotes = [
+      261.63, 293.66, 329.63, 392.00,
+      329.63, 293.66, 261.63, 196.00,
+      220.00, 261.63, 329.63, 392.00,
+      440.00, 392.00, 329.63, 261.63
+    ];
+
+    function initAudio() {
+      if (!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        startBGM();
+      } else if (audioCtx.state === "suspended") {
+        audioCtx.resume();
+      }
+    }
+
+    // Hiệu ứng âm thanh khi Nhảy
+    function playJumpSound() {
+      if (!audioCtx) return;
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(160, audioCtx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(450, audioCtx.currentTime + 0.15);
+      gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
+      gain.gain.linearRampToValueAtTime(0.01, audioCtx.currentTime + 0.15);
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.start();
+      osc.stop(audioCtx.currentTime + 0.15);
+    }
+
+    // Hiệu ứng âm thanh khi Ăn Coin
+    function playCoinSound() {
+      if (!audioCtx) return;
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = "triangle";
+      osc.frequency.setValueAtTime(987.77, audioCtx.currentTime); // Note B5
+      osc.frequency.setValueAtTime(1318.51, audioCtx.currentTime + 0.08); // Note E6
+      gain.gain.setValueAtTime(0.25, audioCtx.currentTime);
+      gain.gain.linearRampToValueAtTime(0.01, audioCtx.currentTime + 0.25);
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.start();
+      osc.stop(audioCtx.currentTime + 0.25);
+    }
+
+    // Hiệu ứng âm thanh Game Over (Va chạm)
+    function playCrashSound() {
+      if (!audioCtx) return;
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = "sawtooth";
+      osc.frequency.setValueAtTime(180, audioCtx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(40, audioCtx.currentTime + 0.4);
+      gain.gain.setValueAtTime(0.4, audioCtx.currentTime);
+      gain.gain.linearRampToValueAtTime(0.01, audioCtx.currentTime + 0.4);
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.start();
+      osc.stop(audioCtx.currentTime + 0.4);
+    }
+
+    // Vòng lặp phát nhạc nền (BGM)
+    function startBGM() {
+      if (bgmInterval) clearInterval(bgmInterval);
+      bgmInterval = setInterval(() => {
+        if (!player.alive || !audioCtx) return;
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = "square"; // Kiểu sóng vuông cổ điển
+        const freq = bgmNotes[bgmStep % bgmNotes.length];
+        bgmStep++;
+
+        osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+        gain.gain.setValueAtTime(0.03, audioCtx.currentTime); // Âm lượng nền vừa phải
+        gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.12);
+
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start();
+        osc.stop(audioCtx.currentTime + 0.12);
+      }, 150); // Nhịp điệu 150ms / nốt
+    }
+
+    function stopBGM() {
+      if (bgmInterval) {
+        clearInterval(bgmInterval);
+        bgmInterval = null;
+      }
+    }
+
+    // ==========================================
+    // LOGIC GAME CHÍNH
+    // ==========================================
     const VP_X = 200;
     const HORIZON = 150;
     const LANES_BASE_X = [80, 200, 320];
 
-    // Trạng thái nhân vật
     let player = {
       lane: 1,
       targetX: 200,
@@ -70,7 +171,6 @@ game_html = """
     let coins = [];
     let spawnTimer = 0;
 
-    // Chiếu tọa độ theo chiều sâu Z ra màn hình 2D
     function project(lane, z) {
       const bottomX = LANES_BASE_X[lane];
       const screenX = VP_X + (bottomX - VP_X) * z;
@@ -92,10 +192,14 @@ game_html = """
       obstacles = [];
       coins = [];
       spawnTimer = 0;
+      bgmStep = 0;
+      startBGM();
     }
 
-    // Bắt sự kiện bàn phím
     window.addEventListener("keydown", (e) => {
+      // Khởi tạo Audio khi người chơi thao tác lần đầu
+      initAudio();
+
       if (!player.alive) {
         if (e.code === "Space" || e.code === "Enter") {
           resetGame();
@@ -110,6 +214,7 @@ game_html = """
       } else if ((e.code === "ArrowUp" || e.code === "Space" || e.code === "KeyW") && !player.isJumping) {
         player.isJumping = true;
         player.jumpVelocity = 14;
+        playJumpSound(); // Phát âm thanh nhảy
       }
     });
 
@@ -131,7 +236,6 @@ game_html = """
         }
       }
 
-      // Sinh vật thể ngẫu nhiên
       spawnTimer++;
       if (spawnTimer > Math.max(35, 75 - Math.floor(player.score / 150))) {
         spawnTimer = 0;
@@ -146,29 +250,33 @@ game_html = """
         }
       }
 
-      // Cập nhật chướng ngại vật
+      // Xử lý chướng ngại vật
       for (let i = obstacles.length - 1; i >= 0; i--) {
         let obs = obstacles[i];
         obs.z += speed * 0.0022;
 
-        // Va chạm khi vật thể chạm tới người chơi
         if (obs.z >= 0.82 && obs.z <= 0.96 && obs.lane === player.lane) {
-          if (obs.type === "barrier") {
-            if (player.yOffset < 28) player.alive = false;
-          } else if (obs.type === "train") {
+          let hit = false;
+          if (obs.type === "barrier" && player.yOffset < 28) hit = true;
+          if (obs.type === "train") hit = true;
+
+          if (hit) {
             player.alive = false;
+            stopBGM();
+            playCrashSound(); // Phát âm thanh va chạm
           }
         }
         if (obs.z > 1.1) obstacles.splice(i, 1);
       }
 
-      // Cập nhật tiền vàng
+      // Xử lý ăn Coin
       for (let i = coins.length - 1; i >= 0; i--) {
         let coin = coins[i];
         coin.z += speed * 0.0022;
 
         if (coin.z >= 0.80 && coin.z <= 0.98 && coin.lane === player.lane) {
           player.coins += 1;
+          playCoinSound(); // Phát âm thanh nhặt vàng
           coins.splice(i, 1);
           continue;
         }
@@ -177,13 +285,11 @@ game_html = """
     }
 
     function drawTrack() {
-      // Trời và cỏ
       ctx.fillStyle = "#64b5f6";
       ctx.fillRect(0, 0, canvas.width, HORIZON);
       ctx.fillStyle = "#4caf50";
       ctx.fillRect(0, HORIZON, canvas.width, canvas.height - HORIZON);
 
-      // Đường ray
       ctx.fillStyle = "#757575";
       ctx.beginPath();
       ctx.moveTo(VP_X - 15, HORIZON);
@@ -193,7 +299,6 @@ game_html = """
       ctx.closePath();
       ctx.fill();
 
-      // Vạch ray
       ctx.strokeStyle = "#eee";
       ctx.lineWidth = 2;
       for (let i = 0; i <= 3; i++) {
@@ -251,19 +356,16 @@ game_html = """
       const drawX = player.currentX;
       const drawY = p.y - player.yOffset;
 
-      // Bóng dưới đất
       ctx.fillStyle = "rgba(0, 0, 0, 0.3)";
       ctx.beginPath();
       ctx.ellipse(drawX, p.y, 25, 8, 0, 0, Math.PI * 2);
       ctx.fill();
 
-      // Ván trượt
       ctx.fillStyle = "#00e676";
       ctx.beginPath();
       ctx.roundRect(drawX - 28, drawY - 4, 56, 8, [4]);
       ctx.fill();
 
-      // Thân và đầu nhân vật
       ctx.fillStyle = "#ff5722";
       ctx.fillRect(drawX - 14, drawY - 45, 28, 40);
 
